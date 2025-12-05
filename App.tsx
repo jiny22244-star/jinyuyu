@@ -1,24 +1,51 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
-import { AppState, ImageFile, Post, Tab } from './types';
+import { ImageFile, Post, Tab } from './types';
 import { RabbitLogo } from './components/RabbitLogo';
+import { savePostToDB, getPostsFromDB, saveProfileToStorage, getProfileFromStorage, UserProfile } from './services/storage';
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [posts, setPosts] = useState<Post[]>([]);
+  const [isLoadingData, setIsLoadingData] = useState(true);
   
   // Upload State
   const [image, setImage] = useState<ImageFile | null>(null);
   const [note, setNote] = useState<string>("");
+  const [isSaving, setIsSaving] = useState(false);
 
   // Profile State
-  const [userProfile, setUserProfile] = useState({
+  const [userProfile, setUserProfile] = useState<UserProfile>({
     name: "余余用户",
     bio: "记录美好，收藏感动"
   });
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [tempProfile, setTempProfile] = useState({ name: "", bio: "" });
+
+  // Initial Data Load
+  useEffect(() => {
+    const loadData = async () => {
+      setIsLoadingData(true);
+      try {
+        // Load Posts from IndexedDB
+        const loadedPosts = await getPostsFromDB();
+        setPosts(loadedPosts);
+
+        // Load Profile from LocalStorage
+        const loadedProfile = getProfileFromStorage();
+        if (loadedProfile) {
+          setUserProfile(loadedProfile);
+        }
+      } catch (error) {
+        console.error("Error loading data:", error);
+      } finally {
+        setIsLoadingData(false);
+      }
+    };
+
+    loadData();
+  }, []);
 
   const handleImageSelected = useCallback((file: File) => {
     const reader = new FileReader();
@@ -38,22 +65,35 @@ const App: React.FC = () => {
     reader.readAsDataURL(file);
   }, []);
 
-  const handleSavePost = () => {
+  const handleSavePost = async () => {
     if (image) {
-      const newPost: Post = {
-        id: Date.now().toString(),
-        image: image,
-        description: note,
-        date: new Date()
-      };
-      setPosts([newPost, ...posts]);
-      
-      // Reset upload state
-      setImage(null);
-      setNote("");
-      
-      // Navigate to Home
-      setActiveTab('home');
+      setIsSaving(true);
+      try {
+        const newPost: Post = {
+          id: Date.now().toString(),
+          image: image,
+          description: note,
+          date: new Date()
+        };
+
+        // Save to Database
+        await savePostToDB(newPost);
+        
+        // Update Local State
+        setPosts(prevPosts => [newPost, ...prevPosts]);
+        
+        // Reset upload state
+        setImage(null);
+        setNote("");
+        
+        // Navigate to Home
+        setActiveTab('home');
+      } catch (error) {
+        console.error("Failed to save post", error);
+        alert("保存失败，请重试");
+      } finally {
+        setIsSaving(false);
+      }
     }
   };
 
@@ -70,6 +110,7 @@ const App: React.FC = () => {
 
   const saveProfile = () => {
     setUserProfile(tempProfile);
+    saveProfileToStorage(tempProfile); // Persist profile
     setIsEditingProfile(false);
   };
 
@@ -85,7 +126,13 @@ const App: React.FC = () => {
         <p className="text-amber-700/60 text-sm tracking-wide">Gallery of Moments</p>
       </div>
       
-      {posts.length === 0 ? (
+      {isLoadingData ? (
+         <div className="flex flex-col items-center justify-center py-20 px-4 text-center animate-pulse">
+           <div className="w-16 h-16 bg-amber-100 rounded-full mb-4"></div>
+           <div className="h-4 bg-amber-100 rounded w-32 mb-2"></div>
+           <div className="h-3 bg-amber-50 rounded w-24"></div>
+         </div>
+      ) : posts.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 px-4 text-center">
           <div className="w-20 h-20 bg-amber-100 rounded-full flex items-center justify-center mb-6 text-amber-400">
             <RabbitLogo className="w-10 h-10" />
@@ -143,7 +190,11 @@ const App: React.FC = () => {
         <p className="text-amber-700/60 text-sm tracking-wide">Sweet Timeline</p>
       </div>
 
-      {posts.length === 0 ? (
+      {isLoadingData ? (
+         <div className="flex flex-col items-center justify-center py-20 animate-pulse">
+            <div className="h-64 bg-amber-50 w-full max-w-md rounded-xl"></div>
+         </div>
+      ) : posts.length === 0 ? (
          <div className="flex flex-col items-center justify-center py-20 px-4 text-center">
           <div className="w-16 h-16 bg-white border-2 border-dashed border-amber-200 rounded-full flex items-center justify-center mb-4 text-amber-300">
             <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
@@ -229,8 +280,8 @@ const App: React.FC = () => {
                />
             </div>
 
-            <Button onClick={handleSavePost} className="w-full py-3 text-lg shadow-amber-200 bg-amber-500 hover:bg-amber-600 text-white" isLoading={false}>
-              保存照片
+            <Button onClick={handleSavePost} className="w-full py-3 text-lg shadow-amber-200 bg-amber-500 hover:bg-amber-600 text-white" isLoading={isSaving} disabled={isSaving}>
+              {isSaving ? "保存中..." : "保存照片"}
             </Button>
           </div>
         )}
