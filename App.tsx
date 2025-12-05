@@ -17,8 +17,8 @@ const App: React.FC = () => {
 
   // Profile State
   const [userProfile, setUserProfile] = useState<UserProfile>({
-    name: "余余用户",
-    bio: "记录美好，收藏感动"
+    name: "余余",
+    bio: "始于心动，终于白首。拥之则安，伴之则暖。一辈子很长，互牵。    ——刘"
   });
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [tempProfile, setTempProfile] = useState({ name: "", bio: "" });
