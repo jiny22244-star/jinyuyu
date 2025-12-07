@@ -23,4 +23,12 @@ export interface Post {
   date: Date;
 }
 
-export type Tab = 'home' | 'moments' | 'upload' | 'profile';
+export interface DiaryEntry {
+  id: string;
+  title: string;
+  content: string;
+  date: Date;
+  updatedAt: Date;
+}
+
+export type Tab = 'home' | 'diary' | 'upload' | 'profile';
