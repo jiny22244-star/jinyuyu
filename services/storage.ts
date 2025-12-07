@@ -50,7 +50,7 @@ export const savePostToDB = async (post: Post): Promise<void> => {
     return new Promise((resolve, reject) => {
       const transaction = db.transaction([STORE_POSTS], 'readwrite');
       const store = transaction.objectStore(STORE_POSTS);
-      const request = store.add(post);
+      const request = store.put(post); // Changed from add to put to support updates/overwrites
 
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
@@ -71,12 +71,14 @@ export const getPostsFromDB = async (): Promise<Post[]> => {
 
       request.onsuccess = () => {
         const posts = request.result as Post[];
+        // Sort by date descending
         posts.sort((a, b) => {
           const dateA = a.date instanceof Date ? a.date : new Date(a.date);
           const dateB = b.date instanceof Date ? b.date : new Date(b.date);
           return dateB.getTime() - dateA.getTime();
         });
         
+        // Ensure Date objects are instantiated
         const postsWithDates = posts.map(p => ({
             ...p,
             date: p.date instanceof Date ? p.date : new Date(p.date)
@@ -182,5 +184,61 @@ export const getProfileFromStorage = (): UserProfile | null => {
   } catch (error) {
     console.error("Failed to load profile:", error);
     return null;
+  }
+};
+
+// --- Backup & Restore ---
+
+export interface BackupData {
+  profile: UserProfile | null;
+  posts: Post[];
+  diary: DiaryEntry[];
+  timestamp: number;
+  version: number;
+}
+
+export const exportAllData = async (): Promise<BackupData> => {
+  const profile = getProfileFromStorage();
+  const posts = await getPostsFromDB();
+  const diary = await getDiaryEntriesFromDB();
+
+  return {
+    profile,
+    posts,
+    diary,
+    timestamp: Date.now(),
+    version: 1
+  };
+};
+
+export const importAllData = async (data: BackupData): Promise<void> => {
+  // 1. Restore Profile
+  if (data.profile) {
+    saveProfileToStorage(data.profile);
+  }
+
+  // 2. Restore Posts (Sequential to ensure transaction safety)
+  if (data.posts && Array.isArray(data.posts)) {
+    for (const post of data.posts) {
+      // Re-hydrate dates
+      const hydratedPost = {
+        ...post,
+        date: new Date(post.date)
+      };
+      await savePostToDB(hydratedPost);
+    }
+  }
+
+  // 3. Restore Diary
+  if (data.diary && Array.isArray(data.diary)) {
+    for (const entry of data.diary) {
+      // Re-hydrate dates
+      const hydratedEntry = {
+        ...entry,
+        date: new Date(entry.date),
+        updatedAt: new Date(entry.updatedAt)
+      };
+      await saveDiaryEntryToDB(hydratedEntry);
+    }
   }
 };

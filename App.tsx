@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
 import { ImageFile, Post, Tab, DiaryEntry } from './types';
@@ -11,7 +11,10 @@ import {
   UserProfile,
   saveDiaryEntryToDB,
   getDiaryEntriesFromDB,
-  deleteDiaryEntryFromDB
+  deleteDiaryEntryFromDB,
+  exportAllData,
+  importAllData,
+  BackupData
 } from './services/storage';
 
 const App: React.FC = () => {
@@ -42,6 +45,7 @@ const App: React.FC = () => {
   });
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [tempProfile, setTempProfile] = useState({ name: "", bio: "" });
+  const backupFileInputRef = useRef<HTMLInputElement>(null);
 
   // Initial Data Load
   useEffect(() => {
@@ -60,9 +64,7 @@ const App: React.FC = () => {
           setUserProfile(loadedProfile);
         }
 
-        // We only load sensitive data if logged in, but for simpler logic 
-        // we can load them but hide them in UI. 
-        // Better practice: load when auth state changes.
+        // We only load sensitive data if logged in
         if (sessionAuth === 'true') {
           const loadedPosts = await getPostsFromDB();
           setPosts(loadedPosts);
@@ -245,6 +247,70 @@ const App: React.FC = () => {
 
   const cancelEditing = () => {
     setIsEditingProfile(false);
+  };
+
+  // Backup & Restore Handlers
+  const handleExportData = async () => {
+    try {
+      const data = await exportAllData();
+      const jsonString = JSON.stringify(data);
+      const blob = new Blob([jsonString], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `yuyu_backup_${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Export failed:", error);
+      alert("备份失败");
+    }
+  };
+
+  const handleImportClick = () => {
+    backupFileInputRef.current?.click();
+  };
+
+  const handleImportFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!window.confirm("恢复数据将合并现有的照片和日记。确定要继续吗？")) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const jsonContent = e.target?.result as string;
+        const data = JSON.parse(jsonContent) as BackupData;
+        
+        await importAllData(data);
+        
+        // Refresh UI
+        if (data.profile) setUserProfile(data.profile);
+        
+        const loadedPosts = await getPostsFromDB();
+        setPosts(loadedPosts);
+        
+        const loadedDiary = await getDiaryEntriesFromDB();
+        setDiaryEntries(loadedDiary);
+        
+        alert("数据恢复成功！");
+      } catch (error) {
+        console.error("Import failed:", error);
+        alert("恢复失败，文件格式可能不正确");
+      } finally {
+        // Reset file input
+        if (backupFileInputRef.current) {
+          backupFileInputRef.current.value = '';
+        }
+      }
+    };
+    reader.readAsText(file);
   };
 
   // --- RENDERERS ---
@@ -526,15 +592,15 @@ const App: React.FC = () => {
 
     // Profile Screen (Authenticated)
     return (
-      <div className="flex flex-col items-center justify-center h-full pb-24 space-y-6 relative overflow-hidden">
+      <div className="flex flex-col items-center justify-center h-full pb-24 space-y-6 relative overflow-hidden overflow-y-auto">
         {/* Background decoration */}
         <div className="absolute top-0 inset-x-0 h-64 bg-gradient-to-b from-amber-100 to-transparent -z-10"></div>
         
-        <div className="w-28 h-28 bg-white rounded-full flex items-center justify-center shadow-xl shadow-amber-200 border-4 border-white mt-10">
+        <div className="w-28 h-28 bg-white rounded-full flex items-center justify-center shadow-xl shadow-amber-200 border-4 border-white mt-10 shrink-0">
            <RabbitLogo className="w-14 h-14 text-amber-500" />
         </div>
         
-        <div className="text-center w-full max-w-xs mx-auto z-10">
+        <div className="text-center w-full max-w-xs mx-auto z-10 shrink-0">
           {isEditingProfile ? (
             <div className="bg-white/80 backdrop-blur-sm p-6 rounded-2xl shadow-lg border border-amber-100 space-y-4 animate-fade-in">
               <div>
@@ -577,29 +643,47 @@ const App: React.FC = () => {
           )}
         </div>
         
-        <div className="w-full max-w-sm px-6 space-y-4 mt-4">
-          <div className="flex justify-between items-center p-5 bg-white rounded-2xl border border-amber-100 shadow-sm transition-transform hover:scale-[1.02]">
-             <div className="flex items-center space-x-3">
-               <div className="p-2 bg-amber-50 rounded-lg text-amber-500">
-                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-               </div>
-               <span className="text-amber-900 font-medium">照片</span>
+        <div className="w-full max-w-sm px-6 space-y-4 pb-8">
+          <div className="grid grid-cols-2 gap-4">
+             <div className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl border border-amber-100 shadow-sm">
+                <span className="text-amber-900 font-bold text-xl">{posts.length}</span>
+                <span className="text-amber-600/70 text-xs font-medium uppercase mt-1">照片</span>
              </div>
-             <span className="text-amber-600 font-bold text-xl">{posts.length}</span>
+             <div className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl border border-amber-100 shadow-sm">
+                <span className="text-amber-900 font-bold text-xl">{diaryEntries.length}</span>
+                <span className="text-amber-600/70 text-xs font-medium uppercase mt-1">日记</span>
+             </div>
           </div>
-          <div className="flex justify-between items-center p-5 bg-white rounded-2xl border border-amber-100 shadow-sm transition-transform hover:scale-[1.02]">
-             <div className="flex items-center space-x-3">
-               <div className="p-2 bg-amber-50 rounded-lg text-amber-500">
-                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
-               </div>
-               <span className="text-amber-900 font-medium">日记</span>
+
+          <div className="bg-white rounded-2xl border border-amber-100 shadow-sm p-4 space-y-3">
+             <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2">数据管理</h3>
+             <div className="grid grid-cols-2 gap-3">
+               <button onClick={handleExportData} className="flex flex-col items-center justify-center p-3 bg-amber-50 rounded-xl hover:bg-amber-100 transition-colors border border-amber-100">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-amber-600 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  <span className="text-xs text-amber-800 font-medium">备份数据</span>
+               </button>
+               <button onClick={handleImportClick} className="flex flex-col items-center justify-center p-3 bg-amber-50 rounded-xl hover:bg-amber-100 transition-colors border border-amber-100">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-amber-600 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  </svg>
+                  <span className="text-xs text-amber-800 font-medium">恢复数据</span>
+               </button>
+               {/* Hidden Input for File Upload */}
+               <input 
+                  type="file" 
+                  ref={backupFileInputRef} 
+                  onChange={handleImportFileChange} 
+                  accept=".json" 
+                  className="hidden" 
+               />
              </div>
-             <span className="text-amber-600 font-bold text-xl">{diaryEntries.length}</span>
           </div>
 
           <button 
             onClick={handleLogout}
-            className="w-full py-3 mt-4 text-amber-600 font-medium hover:bg-amber-50 rounded-xl transition-colors border border-dashed border-amber-200"
+            className="w-full py-3 text-amber-600 font-medium hover:bg-amber-50 rounded-xl transition-colors border border-dashed border-amber-200"
           >
             退出登录
           </button>
