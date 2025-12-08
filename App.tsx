@@ -1,8 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
-import { ImageFile, Post, Tab, DiaryEntry } from './types';
+import { ImageFile, Post, Tab, DiaryEntry, FirebaseConfig, ViewMode } from './types';
 import { RabbitLogo } from './components/RabbitLogo';
+import { GalleryViews } from './components/GalleryViews';
 import { 
   savePostToDB, 
   getPostsFromDB, 
@@ -14,7 +15,11 @@ import {
   deleteDiaryEntryFromDB,
   exportAllData,
   importAllData,
-  BackupData
+  BackupData,
+  getCloudConfig,
+  saveCloudConfig,
+  removeCloudConfig,
+  uploadPostImage
 } from './services/storage';
 
 const App: React.FC = () => {
@@ -47,6 +52,17 @@ const App: React.FC = () => {
   const [tempProfile, setTempProfile] = useState({ name: "", bio: "" });
   const backupFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Cloud Sync State
+  const [showCloudSetup, setShowCloudSetup] = useState(false);
+  const [cloudConfig, setCloudConfig] = useState<FirebaseConfig>({
+    apiKey: "", authDomain: "", projectId: "", storageBucket: "", messagingSenderId: "", appId: ""
+  });
+  const [isCloudActive, setIsCloudActive] = useState(false);
+
+  // View Mode State
+  const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [isEffectMenuOpen, setIsEffectMenuOpen] = useState(false);
+
   // Initial Data Load
   useEffect(() => {
     // Check session login
@@ -55,21 +71,23 @@ const App: React.FC = () => {
       setIsLoggedIn(true);
     }
 
+    // Check cloud config
+    const storedConfig = getCloudConfig();
+    if (storedConfig) {
+      setIsCloudActive(true);
+      setCloudConfig(storedConfig);
+    }
+
     const loadData = async () => {
       setIsLoadingData(true);
       try {
-        // Load Profile
         const loadedProfile = getProfileFromStorage();
         if (loadedProfile) {
           setUserProfile(loadedProfile);
         }
 
-        // We only load sensitive data if logged in
         if (sessionAuth === 'true') {
-          const loadedPosts = await getPostsFromDB();
-          setPosts(loadedPosts);
-          const loadedDiary = await getDiaryEntriesFromDB();
-          setDiaryEntries(loadedDiary);
+          await refreshData();
         }
       } catch (error) {
         console.error("Error loading data:", error);
@@ -81,23 +99,18 @@ const App: React.FC = () => {
     loadData();
   }, []);
 
+  const refreshData = async () => {
+    const loadedPosts = await getPostsFromDB();
+    setPosts(loadedPosts);
+    const loadedDiary = await getDiaryEntriesFromDB();
+    setDiaryEntries(loadedDiary);
+  };
+
   // Effect to load secure data when user logs in
   useEffect(() => {
     if (isLoggedIn) {
-      const fetchSecureData = async () => {
-        setIsLoadingData(true);
-        try {
-          const loadedPosts = await getPostsFromDB();
-          setPosts(loadedPosts);
-          const loadedDiary = await getDiaryEntriesFromDB();
-          setDiaryEntries(loadedDiary);
-        } catch (e) {
-          console.error(e);
-        } finally {
-          setIsLoadingData(false);
-        }
-      };
-      fetchSecureData();
+      setIsLoadingData(true);
+      refreshData().finally(() => setIsLoadingData(false));
     }
   }, [isLoggedIn]);
 
@@ -117,9 +130,9 @@ const App: React.FC = () => {
   const handleLogout = () => {
     setIsLoggedIn(false);
     sessionStorage.removeItem('yuyu_auth');
-    setPosts([]); // Clear sensitive data from memory
+    setPosts([]);
     setDiaryEntries([]);
-    setActiveTab('profile'); // Return to login screen
+    setActiveTab('profile');
   };
 
   // Upload Handlers
@@ -145,21 +158,31 @@ const App: React.FC = () => {
     if (image) {
       setIsSaving(true);
       try {
+        let imageUrl = undefined;
+        // If file exists, upload it (Cloud logic inside uploadPostImage)
+        if (image.file) {
+          imageUrl = await uploadPostImage(image.file);
+        }
+
         const newPost: Post = {
           id: Date.now().toString(),
-          image: image,
+          image: image, // Local preview
           description: note,
-          date: new Date()
+          date: new Date(),
+          imageUrl: imageUrl // Cloud URL if uploaded
         };
 
         await savePostToDB(newPost);
-        setPosts(prevPosts => [newPost, ...prevPosts]);
+        
+        // Refresh full list to ensure sync
+        await refreshData();
+        
         setImage(null);
         setNote("");
         setActiveTab('home');
       } catch (error) {
         console.error("Failed to save post", error);
-        alert("保存失败，请重试");
+        alert("保存失败，请检查网络或配置");
       } finally {
         setIsSaving(false);
       }
@@ -205,31 +228,11 @@ const App: React.FC = () => {
       };
 
       await saveDiaryEntryToDB(entryToSave);
-      
-      if (editingEntry) {
-        setDiaryEntries(prev => prev.map(e => e.id === entryToSave.id ? entryToSave : e));
-      } else {
-        setDiaryEntries(prev => [entryToSave, ...prev]);
-      }
-
+      await refreshData();
       setIsWritingDiary(false);
     } catch (e) {
       console.error("Failed to save diary", e);
       alert("保存失败");
-    }
-  };
-
-  const handleDeleteDiary = async (id: string) => {
-    if (window.confirm("确定要删除这篇日记吗？")) {
-      try {
-        await deleteDiaryEntryFromDB(id);
-        setDiaryEntries(prev => prev.filter(e => e.id !== id));
-        if (editingEntry?.id === id) {
-          setIsWritingDiary(false);
-        }
-      } catch (e) {
-        console.error("Failed to delete", e);
-      }
     }
   };
 
@@ -287,24 +290,14 @@ const App: React.FC = () => {
       try {
         const jsonContent = e.target?.result as string;
         const data = JSON.parse(jsonContent) as BackupData;
-        
         await importAllData(data);
-        
-        // Refresh UI
         if (data.profile) setUserProfile(data.profile);
-        
-        const loadedPosts = await getPostsFromDB();
-        setPosts(loadedPosts);
-        
-        const loadedDiary = await getDiaryEntriesFromDB();
-        setDiaryEntries(loadedDiary);
-        
+        await refreshData();
         alert("数据恢复成功！");
       } catch (error) {
         console.error("Import failed:", error);
         alert("恢复失败，文件格式可能不正确");
       } finally {
-        // Reset file input
         if (backupFileInputRef.current) {
           backupFileInputRef.current.value = '';
         }
@@ -313,11 +306,39 @@ const App: React.FC = () => {
     reader.readAsText(file);
   };
 
+  // Cloud Config Handlers
+  const handleSaveCloudConfig = () => {
+    if (!cloudConfig.apiKey || !cloudConfig.projectId) {
+      alert("请填写完整的配置信息");
+      return;
+    }
+    saveCloudConfig(cloudConfig);
+    setIsCloudActive(true);
+    setShowCloudSetup(false);
+    alert("云同步已开启！请重新登录以加载云端数据。");
+    handleLogout(); 
+  };
+
+  const handleDisconnectCloud = () => {
+    if (window.confirm("确定要断开云同步吗？将切换回本地数据。")) {
+      removeCloudConfig();
+      setIsCloudActive(false);
+      setCloudConfig({ apiKey: "", authDomain: "", projectId: "", storageBucket: "", messagingSenderId: "", appId: "" });
+      alert("已断开连接。");
+      handleLogout();
+    }
+  };
+
+  const handleEffectChange = (mode: ViewMode) => {
+    setViewMode(mode);
+    setIsEffectMenuOpen(false);
+  };
+
   // --- RENDERERS ---
 
   const renderLoginRequired = () => (
-    <div className="flex flex-col items-center justify-center h-full px-6 text-center animate-fade-in">
-      <div className="w-24 h-24 bg-amber-100 rounded-full flex items-center justify-center mb-6 text-amber-500">
+    <div className="flex flex-col items-center justify-center h-full px-6 text-center animate-fade-in relative z-10">
+      <div className="w-24 h-24 bg-amber-100 rounded-full flex items-center justify-center mb-6 text-amber-500 shadow-inner">
         <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
         </svg>
@@ -330,190 +351,118 @@ const App: React.FC = () => {
     </div>
   );
 
-  const renderHome = () => {
-    if (!isLoggedIn) return renderLoginRequired();
-
-    return (
-      <div className="space-y-6 pb-24">
-        <div className="px-6 pt-6 max-w-7xl mx-auto w-full">
-          <h2 className="text-3xl font-serif-sc font-bold text-amber-900 mb-1">主页</h2>
-          <p className="text-amber-700/60 text-sm tracking-wide">Gallery of Moments</p>
-        </div>
+  const renderHomeHeader = () => (
+    <div className="px-6 pt-6 max-w-7xl mx-auto w-full flex justify-between items-end relative z-40">
+      <div className="bg-white/30 backdrop-blur-sm px-3 py-1 rounded-lg">
+        <h2 className="text-3xl font-serif-sc font-bold text-amber-900 mb-1">主页</h2>
+        <p className="text-amber-800/80 text-sm tracking-wide font-medium">
+          {isCloudActive ? 'Cloud Gallery' : 'Local Gallery'}
+        </p>
+      </div>
+      <div className="flex items-center space-x-3">
+        {isCloudActive && (
+          <span className="text-xs bg-blue-100/80 backdrop-blur-sm text-blue-800 px-2 py-1 rounded-full font-medium flex items-center shadow-sm">
+            <span className="w-2 h-2 bg-blue-500 rounded-full mr-1 animate-pulse"></span>
+            云端同步中
+          </span>
+        )}
         
-        {isLoadingData ? (
-           <div className="flex flex-col items-center justify-center py-20 px-4 text-center animate-pulse">
-             <div className="w-16 h-16 bg-amber-100 rounded-full mb-4"></div>
-             <div className="h-4 bg-amber-100 rounded w-32 mb-2"></div>
-           </div>
-        ) : posts.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 px-4 text-center">
-            <div className="w-20 h-20 bg-amber-100 rounded-full flex items-center justify-center mb-6 text-amber-400">
-              <RabbitLogo className="w-10 h-10" />
+        {/* Settings Dropdown for Effects */}
+        <div className="relative">
+          <button 
+            onClick={() => setIsEffectMenuOpen(!isEffectMenuOpen)}
+            className="w-10 h-10 rounded-full bg-white/80 backdrop-blur-sm border border-amber-200 shadow-sm flex items-center justify-center text-amber-600 hover:bg-white transition-all hover:shadow-md"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+          
+          {isEffectMenuOpen && (
+            <div className="absolute right-0 mt-2 w-48 bg-white/95 backdrop-blur rounded-lg shadow-xl border border-amber-100 py-1 z-50 animate-fade-in">
+              <button onClick={() => handleEffectChange('grid')} className={`block w-full text-left px-4 py-2 text-sm hover:bg-amber-50 ${viewMode === 'grid' ? 'text-amber-600 font-bold bg-amber-50/50' : 'text-gray-700'}`}>
+                📷 普通网格
+              </button>
+              <button onClick={() => handleEffectChange('spiral')} className={`block w-full text-left px-4 py-2 text-sm hover:bg-amber-50 ${viewMode === 'spiral' ? 'text-amber-600 font-bold bg-amber-50/50' : 'text-gray-700'}`}>
+                🌀 环形旋转
+              </button>
+              <button onClick={() => handleEffectChange('tree')} className={`block w-full text-left px-4 py-2 text-sm hover:bg-amber-50 ${viewMode === 'tree' ? 'text-amber-600 font-bold bg-amber-50/50' : 'text-gray-700'}`}>
+                🎄 圣诞树
+              </button>
+              <button onClick={() => handleEffectChange('kaleidoscope')} className={`block w-full text-left px-4 py-2 text-sm hover:bg-amber-50 ${viewMode === 'kaleidoscope' ? 'text-amber-600 font-bold bg-amber-50/50' : 'text-gray-700'}`}>
+                🌸 万花镜
+              </button>
             </div>
-            <p className="text-amber-800 font-medium mb-2">还没有照片哦</p>
-            <p className="text-amber-600/60 text-sm mb-6">记录下你的第一个美好瞬间吧</p>
-            <Button onClick={() => setActiveTab('upload')} variant="primary" className="shadow-amber-200">
-              去上传
-            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderHome = () => (
+    <div className="flex-1 overflow-hidden flex flex-col relative h-full">
+      {renderHomeHeader()}
+      
+      <div className="flex-1 overflow-y-auto custom-scrollbar px-4 pt-4 pb-24 relative z-0">
+        {!isLoggedIn ? (
+          renderLoginRequired()
+        ) : isLoadingData ? (
+          <div className="flex justify-center py-12">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-amber-500"></div>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 px-4 md:px-8 max-w-7xl mx-auto w-full">
-            {posts.map((post) => (
-              <div key={post.id} className="bg-white rounded-2xl overflow-hidden shadow-lg shadow-amber-100/50 border border-amber-50 flex flex-col h-full transition-transform duration-300 hover:-translate-y-1 hover:shadow-xl">
-                <div className="aspect-w-4 aspect-h-3 w-full">
+        ) : posts.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-64 text-amber-800/50">
+            <RabbitLogo className="w-16 h-16 mb-4 opacity-50" />
+            <p>还没有照片哦，快去上传吧</p>
+          </div>
+        ) : viewMode === 'grid' ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-7xl mx-auto pb-10">
+            {posts.map(post => (
+              <div key={post.id} className="bg-white rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow border border-amber-100 break-inside-avoid">
+                <div className="relative aspect-square bg-amber-50">
                   <img 
-                    src={post.image.previewUrl} 
+                    src={post.imageUrl || post.image.previewUrl} 
                     alt="Post" 
                     className="w-full h-full object-cover"
                     loading="lazy"
                   />
                 </div>
-                <div className="p-5 flex flex-col flex-grow">
-                  <div className="flex justify-between items-center mb-3">
-                    <div className="flex items-center space-x-2">
-                       <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center text-amber-600 border border-amber-200 shrink-0">
-                          <RabbitLogo className="w-5 h-5" />
-                       </div>
-                       <span className="text-sm font-bold text-amber-900 truncate max-w-[100px]">{userProfile.name}</span>
-                    </div>
-                    <span className="text-xs text-amber-400 font-medium bg-amber-50 px-2 py-1 rounded-full whitespace-nowrap">
-                      {post.date.toLocaleDateString()}
-                    </span>
+                {post.description && (
+                  <div className="p-4">
+                    <p className="text-amber-900 text-sm leading-relaxed whitespace-pre-wrap font-serif-sc">{post.description}</p>
+                    <p className="text-amber-400 text-xs mt-2">{new Date(post.date).toLocaleDateString()}</p>
                   </div>
-                  {post.description && (
-                    <p className="text-amber-800 text-sm line-clamp-3 leading-relaxed whitespace-pre-wrap flex-grow">
-                      {post.description}
-                    </p>
-                  )}
-                </div>
+                )}
               </div>
             ))}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const renderDiary = () => {
-    if (!isLoggedIn) return renderLoginRequired();
-
-    if (isWritingDiary) {
-      return (
-        <div className="h-full flex flex-col pb-24 px-4 pt-6 max-w-3xl mx-auto w-full animate-slide-up">
-           <div className="flex justify-between items-center mb-6">
-             <button onClick={cancelWritingDiary} className="text-amber-600 font-medium text-sm flex items-center hover:bg-amber-100 px-3 py-1.5 rounded-lg transition-colors">
-               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M9.707 16.707a1 1 0 01-1.414 0l-6-6a1 1 0 010-1.414l6-6a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l4.293 4.293a1 1 0 010 1.414z" clipRule="evenodd" /></svg>
-               返回
-             </button>
-             <h2 className="text-xl font-bold text-amber-900">{editingEntry ? '编辑日记' : '新日记'}</h2>
-             <Button onClick={saveDiaryEntry} className="shadow-amber-200 text-sm py-1.5 px-4">保存</Button>
-           </div>
-           
-           <div className="bg-white rounded-2xl shadow-sm border border-amber-100 flex-1 flex flex-col overflow-hidden">
-             <input 
-               type="text" 
-               placeholder="标题..."
-               value={diaryForm.title}
-               onChange={(e) => setDiaryForm({...diaryForm, title: e.target.value})}
-               className="w-full px-6 py-4 text-xl font-bold text-amber-900 placeholder-amber-300 border-b border-amber-100 focus:outline-none bg-transparent"
-             />
-             <textarea 
-               placeholder="写下今天的故事..."
-               value={diaryForm.content}
-               onChange={(e) => setDiaryForm({...diaryForm, content: e.target.value})}
-               className="w-full flex-1 px-6 py-4 text-amber-800 leading-relaxed resize-none focus:outline-none bg-transparent custom-scrollbar"
-             />
-             <div className="px-4 py-2 bg-amber-50 text-right text-xs text-amber-400">
-               {editingEntry ? `最后修改: ${editingEntry.updatedAt.toLocaleString()}` : new Date().toLocaleDateString()}
-             </div>
-           </div>
-           
-           {editingEntry && (
-             <div className="mt-4 text-center">
-               <button onClick={() => handleDeleteDiary(editingEntry.id)} className="text-red-400 text-sm hover:text-red-600 transition-colors">删除这篇日记</button>
-             </div>
-           )}
-        </div>
-      );
-    }
-
-    return (
-      <div className="space-y-6 pb-24 h-full relative">
-        <div className="px-6 pt-6 sticky top-14 bg-[#FFF8E1]/95 z-20 backdrop-blur-sm pb-4 border-b border-amber-100/50 max-w-3xl mx-auto w-full flex justify-between items-end">
-          <div>
-            <h2 className="text-3xl font-serif-sc font-bold text-amber-900 mb-1">日记</h2>
-            <p className="text-amber-700/60 text-sm tracking-wide">My Stories</p>
-          </div>
-          <button 
-            onClick={() => startWritingDiary()} 
-            className="w-10 h-10 rounded-full bg-amber-500 text-white flex items-center justify-center shadow-lg shadow-amber-500/30 hover:bg-amber-600 transition-colors"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-          </button>
-        </div>
-
-        {isLoadingData ? (
-           <div className="flex flex-col items-center justify-center py-20 animate-pulse">
-              <div className="w-12 h-12 bg-amber-100 rounded-full mb-3"></div>
-              <div className="h-4 bg-amber-50 w-32 rounded"></div>
-           </div>
-        ) : diaryEntries.length === 0 ? (
-           <div className="flex flex-col items-center justify-center py-20 px-4 text-center">
-            <div className="w-16 h-16 bg-amber-100 rounded-xl rotate-3 flex items-center justify-center mb-4 text-amber-400 shadow-sm">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
-            </div>
-            <p className="text-amber-700 font-medium">还没有日记</p>
-            <p className="text-amber-500/60 text-sm mt-1 mb-6">写下你的第一篇心事吧</p>
-            <Button onClick={() => startWritingDiary()} variant="secondary" className="border-amber-300">
-              写日记
-            </Button>
           </div>
         ) : (
-          <div className="px-4 max-w-3xl mx-auto w-full grid gap-4">
-            {diaryEntries.map((entry) => (
-              <div 
-                key={entry.id} 
-                onClick={() => startWritingDiary(entry)}
-                className="bg-white p-5 rounded-2xl shadow-sm border border-amber-100 hover:shadow-md hover:border-amber-200 transition-all cursor-pointer group"
-              >
-                <div className="flex justify-between items-start mb-2">
-                  <h3 className="text-lg font-bold text-amber-900 group-hover:text-amber-600 transition-colors line-clamp-1">{entry.title}</h3>
-                  <span className="text-xs text-amber-400 bg-amber-50 px-2 py-1 rounded-lg whitespace-nowrap ml-2">
-                    {entry.date.toLocaleDateString()}
-                  </span>
-                </div>
-                <p className="text-amber-800/80 text-sm line-clamp-2 leading-relaxed">
-                  {entry.content}
-                </p>
-              </div>
-            ))}
+          <div className="absolute inset-0 top-16">
+            <GalleryViews posts={posts} mode={viewMode} />
           </div>
         )}
       </div>
-    );
-  };
+    </div>
+  );
 
-  const renderUpload = () => {
-    if (!isLoggedIn) return renderLoginRequired();
-
-    return (
-      <div className="h-full flex flex-col pb-24 px-4 pt-6 max-w-3xl mx-auto w-full">
-         <h2 className="text-3xl font-serif-sc font-bold text-amber-900 mb-6 px-2">上传照片</h2>
-         
-         <div className="flex-1 overflow-y-auto no-scrollbar px-2">
+  const renderUpload = () => (
+    <div className="flex-1 overflow-y-auto px-4 pt-6 pb-24 relative z-10">
+      <h2 className="text-3xl font-serif-sc font-bold text-amber-900 px-2 mb-8 text-center">记录美好</h2>
+      
+      {!isLoggedIn ? (
+        renderLoginRequired()
+      ) : (
+        <div className="max-w-xl mx-auto bg-white/60 backdrop-blur-sm p-6 rounded-3xl shadow-sm border border-amber-100">
           {!image ? (
             <ImageUploader onImageSelected={handleImageSelected} />
           ) : (
-            <div className="space-y-6 animate-fade-in pb-4">
-              <div className="relative rounded-2xl overflow-hidden bg-amber-50 border border-amber-200 max-h-[40vh] flex items-center justify-center shadow-lg">
-                <img 
-                  src={image.previewUrl} 
-                  alt="Preview" 
-                  className="max-h-[40vh] w-full object-contain"
-                />
+            <div className="space-y-6 animate-fade-in">
+              <div className="relative rounded-2xl overflow-hidden shadow-lg border-4 border-white">
+                <img src={image.previewUrl} alt="Preview" className="w-full h-auto" />
                 <button 
                   onClick={handleResetUpload}
-                  className="absolute top-3 right-3 p-2 bg-white/80 text-amber-900 rounded-full hover:bg-red-500 hover:text-white transition-all shadow-sm"
+                  className="absolute top-2 right-2 bg-black/50 text-white p-2 rounded-full hover:bg-black/70 transition-colors"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                     <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
@@ -521,252 +470,390 @@ const App: React.FC = () => {
                 </button>
               </div>
 
-              <div className="space-y-3">
-                 <label className="block text-sm font-bold text-amber-900 uppercase tracking-wider">记录这一刻 (可选)</label>
-                 <textarea
-                   value={note}
-                   onChange={(e) => setNote(e.target.value)}
-                   placeholder="写下当下的心情..."
-                   className="w-full bg-white border border-amber-200 rounded-xl px-4 py-3 text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-400 placeholder-amber-300 min-h-[120px] shadow-sm resize-none"
-                 />
-              </div>
-
-              <Button onClick={handleSavePost} className="w-full py-3 text-lg shadow-amber-200 bg-amber-500 hover:bg-amber-600 text-white" isLoading={isSaving} disabled={isSaving}>
-                {isSaving ? "保存中..." : "保存照片"}
-              </Button>
-            </div>
-          )}
-         </div>
-      </div>
-    );
-  };
-
-  const renderProfile = () => {
-    // Login Screen
-    if (!isLoggedIn) {
-      return (
-        <div className="h-full flex flex-col items-center justify-center p-6 pb-20 max-w-sm mx-auto w-full animate-fade-in">
-           <div className="w-24 h-24 bg-white rounded-full flex items-center justify-center shadow-xl shadow-amber-200 mb-8">
-              <RabbitLogo className="w-12 h-12 text-amber-500" />
-           </div>
-           
-           <h2 className="text-2xl font-serif-sc font-bold text-amber-900 mb-8">欢迎回来，余余</h2>
-           
-           <form onSubmit={handleLogin} className="w-full space-y-4">
-             <div>
-               <label className="block text-xs font-bold text-amber-600 uppercase tracking-wider mb-1 ml-1">账号</label>
-               <input 
-                 type="text" 
-                 value={loginForm.username}
-                 onChange={(e) => setLoginForm({...loginForm, username: e.target.value})}
-                 className="w-full bg-white border border-amber-200 rounded-xl px-4 py-3 text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-400 shadow-sm transition-all focus:border-amber-400"
-                 placeholder="请输入账号"
-               />
-             </div>
-             <div>
-               <label className="block text-xs font-bold text-amber-600 uppercase tracking-wider mb-1 ml-1">密码</label>
-               <input 
-                 type="password" 
-                 value={loginForm.password}
-                 onChange={(e) => setLoginForm({...loginForm, password: e.target.value})}
-                 className="w-full bg-white border border-amber-200 rounded-xl px-4 py-3 text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-400 shadow-sm transition-all focus:border-amber-400"
-                 placeholder="请输入密码"
-               />
-             </div>
-             
-             {loginError && (
-               <div className="text-red-500 text-sm text-center font-medium bg-red-50 py-2 rounded-lg">{loginError}</div>
-             )}
-             
-             <Button type="submit" className="w-full py-3 mt-4 text-lg shadow-amber-200">
-               登录
-             </Button>
-           </form>
-           
-           <p className="mt-8 text-amber-400 text-xs text-center">
-             始于心动，终于白首
-           </p>
-        </div>
-      );
-    }
-
-    // Profile Screen (Authenticated)
-    return (
-      <div className="flex flex-col items-center justify-center h-full pb-24 space-y-6 relative overflow-hidden overflow-y-auto">
-        {/* Background decoration */}
-        <div className="absolute top-0 inset-x-0 h-64 bg-gradient-to-b from-amber-100 to-transparent -z-10"></div>
-        
-        <div className="w-28 h-28 bg-white rounded-full flex items-center justify-center shadow-xl shadow-amber-200 border-4 border-white mt-10 shrink-0">
-           <RabbitLogo className="w-14 h-14 text-amber-500" />
-        </div>
-        
-        <div className="text-center w-full max-w-xs mx-auto z-10 shrink-0">
-          {isEditingProfile ? (
-            <div className="bg-white/80 backdrop-blur-sm p-6 rounded-2xl shadow-lg border border-amber-100 space-y-4 animate-fade-in">
-              <div>
-                <label className="block text-xs font-bold text-amber-500 uppercase tracking-wider mb-1 text-left">昵称</label>
-                <input 
-                  type="text" 
-                  value={tempProfile.name}
-                  onChange={(e) => setTempProfile({...tempProfile, name: e.target.value})}
-                  className="w-full bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-400"
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-amber-800">这一刻的想法...</label>
+                <textarea
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="写下你的心情..."
+                  className="w-full p-4 rounded-xl border-amber-200 bg-white/80 focus:ring-2 focus:ring-amber-400 focus:border-transparent transition-all resize-none h-32 text-amber-900 placeholder-amber-300"
                 />
               </div>
-              <div>
-                <label className="block text-xs font-bold text-amber-500 uppercase tracking-wider mb-1 text-left">简介</label>
-                <textarea 
-                  value={tempProfile.bio}
-                  onChange={(e) => setTempProfile({...tempProfile, bio: e.target.value})}
-                  className="w-full bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-400 min-h-[80px]"
-                />
-              </div>
-              <div className="flex space-x-3 pt-2">
-                <Button onClick={cancelEditing} variant="secondary" className="flex-1 text-sm py-1.5">取消</Button>
-                <Button onClick={saveProfile} variant="primary" className="flex-1 text-sm py-1.5 shadow-amber-200">保存</Button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <h2 className="text-2xl font-bold text-amber-900 mb-2">{userProfile.name}</h2>
-              <p className="text-amber-700/80 leading-relaxed px-4 whitespace-pre-wrap">{userProfile.bio}</p>
               
-              <button 
-                onClick={startEditing}
-                className="mt-4 text-amber-500 text-sm font-medium hover:text-amber-600 transition-colors flex items-center justify-center mx-auto px-4 py-1.5 rounded-full hover:bg-amber-50"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                  <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                </svg>
-                编辑个人资料
-              </button>
-            </>
+              <div className="flex gap-3 pt-2">
+                <Button 
+                  onClick={handleSavePost} 
+                  isLoading={isSaving}
+                  className="w-full py-3 text-lg"
+                >
+                  保存照片
+                </Button>
+              </div>
+            </div>
           )}
         </div>
-        
-        <div className="w-full max-w-sm px-6 space-y-4 pb-8">
-          <div className="grid grid-cols-2 gap-4">
-             <div className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl border border-amber-100 shadow-sm">
-                <span className="text-amber-900 font-bold text-xl">{posts.length}</span>
-                <span className="text-amber-600/70 text-xs font-medium uppercase mt-1">照片</span>
-             </div>
-             <div className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl border border-amber-100 shadow-sm">
-                <span className="text-amber-900 font-bold text-xl">{diaryEntries.length}</span>
-                <span className="text-amber-600/70 text-xs font-medium uppercase mt-1">日记</span>
+      )}
+    </div>
+  );
+
+  const renderDiary = () => (
+    <div className="flex-1 overflow-y-auto px-4 pt-6 pb-24 relative z-10">
+      <div className="max-w-3xl mx-auto">
+        <div className="flex justify-between items-center mb-6 px-2">
+          <h2 className="text-3xl font-serif-sc font-bold text-amber-900">日记</h2>
+          {isLoggedIn && !isWritingDiary && (
+            <Button onClick={() => startWritingDiary()} className="rounded-full w-10 h-10 p-0 flex items-center justify-center">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
+              </svg>
+            </Button>
+          )}
+        </div>
+
+        {!isLoggedIn ? (
+          renderLoginRequired()
+        ) : isWritingDiary ? (
+          <div className="bg-white/80 backdrop-blur-md p-6 rounded-2xl shadow-sm border border-amber-100 animate-fade-in">
+             <input
+               type="text"
+               value={diaryForm.title}
+               onChange={(e) => setDiaryForm({...diaryForm, title: e.target.value})}
+               placeholder="标题"
+               className="w-full text-xl font-bold text-amber-900 bg-transparent border-b border-amber-200 pb-2 mb-4 focus:outline-none focus:border-amber-500 placeholder-amber-300"
+             />
+             <textarea
+               value={diaryForm.content}
+               onChange={(e) => setDiaryForm({...diaryForm, content: e.target.value})}
+               placeholder="今天发生了什么..."
+               className="w-full h-64 bg-transparent resize-none text-amber-900 leading-relaxed focus:outline-none placeholder-amber-300 custom-scrollbar"
+             />
+             <div className="flex justify-end gap-3 mt-4">
+               <Button variant="ghost" onClick={cancelWritingDiary}>取消</Button>
+               <Button onClick={saveDiaryEntry}>保存</Button>
              </div>
           </div>
-
-          <div className="bg-white rounded-2xl border border-amber-100 shadow-sm p-4 space-y-3">
-             <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2">数据管理</h3>
-             <div className="grid grid-cols-2 gap-3">
-               <button onClick={handleExportData} className="flex flex-col items-center justify-center p-3 bg-amber-50 rounded-xl hover:bg-amber-100 transition-colors border border-amber-100">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-amber-600 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  </svg>
-                  <span className="text-xs text-amber-800 font-medium">备份数据</span>
-               </button>
-               <button onClick={handleImportClick} className="flex flex-col items-center justify-center p-3 bg-amber-50 rounded-xl hover:bg-amber-100 transition-colors border border-amber-100">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-amber-600 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                  </svg>
-                  <span className="text-xs text-amber-800 font-medium">恢复数据</span>
-               </button>
-               {/* Hidden Input for File Upload */}
-               <input 
-                  type="file" 
-                  ref={backupFileInputRef} 
-                  onChange={handleImportFileChange} 
-                  accept=".json" 
-                  className="hidden" 
-               />
-             </div>
-          </div>
-
-          <button 
-            onClick={handleLogout}
-            className="w-full py-3 text-amber-600 font-medium hover:bg-amber-50 rounded-xl transition-colors border border-dashed border-amber-200"
-          >
-            退出登录
-          </button>
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <div className="min-h-screen bg-[#FFF8E1] text-amber-900 font-sans selection:bg-amber-200 flex flex-col">
-      {/* Top Header */}
-      <header className="sticky top-0 z-40 bg-[#FFF8E1]/90 backdrop-blur-md border-b border-amber-100 px-4 py-3 flex items-center justify-between shadow-sm">
-        <div className="flex items-center space-x-2">
-          <RabbitLogo className="w-8 h-8 text-amber-500" />
-          <span className="text-xl font-serif-sc font-bold tracking-wide text-amber-900">余余</span>
-        </div>
-        {isLoggedIn && (
-          <div className="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center cursor-pointer hover:bg-amber-200 transition-colors">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-amber-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-            </svg>
+        ) : (
+          <div className="space-y-4">
+            {diaryEntries.length === 0 ? (
+              <div className="text-center py-12 text-amber-800/50">
+                <p>还没有日记，记录下今天吧</p>
+              </div>
+            ) : (
+              diaryEntries.map(entry => (
+                <div key={entry.id} className="bg-white/60 backdrop-blur-sm p-5 rounded-xl border border-amber-100 hover:shadow-md transition-shadow group relative">
+                  <div className="flex justify-between items-start mb-2">
+                    <h3 className="text-lg font-bold text-amber-900">{entry.title}</h3>
+                    <span className="text-xs text-amber-500 bg-amber-50 px-2 py-1 rounded-full">
+                      {new Date(entry.date).toLocaleDateString()}
+                    </span>
+                  </div>
+                  <p className="text-amber-800/80 line-clamp-3 leading-relaxed whitespace-pre-wrap text-sm">{entry.content}</p>
+                  
+                  <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2">
+                    <button 
+                      onClick={() => startWritingDiary(entry)}
+                      className="text-amber-400 hover:text-amber-600 p-1 bg-white rounded-md shadow-sm"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                      </svg>
+                    </button>
+                    <button 
+                      onClick={async () => {
+                        if(confirm('确定要删除这篇日记吗？')) {
+                          await deleteDiaryEntryFromDB(entry.id);
+                          await refreshData();
+                        }
+                      }}
+                      className="text-red-400 hover:text-red-600 p-1 bg-white rounded-md shadow-sm"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         )}
-      </header>
+      </div>
+    </div>
+  );
 
-      {/* Main Content Area */}
-      <main className="flex-1 overflow-x-hidden relative">
+  const renderProfile = () => (
+    <div className="flex-1 overflow-y-auto px-6 pt-10 pb-24 relative z-10">
+      <div className="max-w-md mx-auto">
+        {!isLoggedIn ? (
+          <div className="bg-white/80 backdrop-blur-md p-8 rounded-3xl shadow-sm border border-amber-100 animate-fade-in">
+            <h2 className="text-2xl font-bold text-amber-900 mb-6 text-center">登录</h2>
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-amber-700 mb-1">账号</label>
+                <input
+                  type="text"
+                  value={loginForm.username}
+                  onChange={(e) => setLoginForm({...loginForm, username: e.target.value})}
+                  className="w-full px-4 py-2 rounded-lg border border-amber-200 focus:ring-2 focus:ring-amber-400 focus:outline-none bg-white/50"
+                  placeholder="请输入账号"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-amber-700 mb-1">密码</label>
+                <input
+                  type="password"
+                  value={loginForm.password}
+                  onChange={(e) => setLoginForm({...loginForm, password: e.target.value})}
+                  className="w-full px-4 py-2 rounded-lg border border-amber-200 focus:ring-2 focus:ring-amber-400 focus:outline-none bg-white/50"
+                  placeholder="请输入密码"
+                />
+              </div>
+              {loginError && <p className="text-red-500 text-sm text-center">{loginError}</p>}
+              <Button type="submit" className="w-full py-2.5 mt-2">进入我的空间</Button>
+            </form>
+          </div>
+        ) : showCloudSetup ? (
+          <div className="bg-white/80 backdrop-blur-md p-6 rounded-3xl shadow-sm border border-amber-100 animate-fade-in">
+            <h3 className="text-xl font-bold text-amber-900 mb-4">云同步设置</h3>
+            <p className="text-sm text-amber-700 mb-4 bg-amber-50 p-3 rounded-lg">
+              配置 Firebase 以在多台设备间同步数据。你需要创建一个 Firebase 项目并启用 Firestore 和 Storage。
+            </p>
+            <div className="space-y-3">
+              <input type="text" placeholder="API Key" className="w-full p-2 rounded border border-amber-200 text-sm" value={cloudConfig.apiKey} onChange={e => setCloudConfig({...cloudConfig, apiKey: e.target.value})} />
+              <input type="text" placeholder="Auth Domain" className="w-full p-2 rounded border border-amber-200 text-sm" value={cloudConfig.authDomain} onChange={e => setCloudConfig({...cloudConfig, authDomain: e.target.value})} />
+              <input type="text" placeholder="Project ID" className="w-full p-2 rounded border border-amber-200 text-sm" value={cloudConfig.projectId} onChange={e => setCloudConfig({...cloudConfig, projectId: e.target.value})} />
+              <input type="text" placeholder="Storage Bucket" className="w-full p-2 rounded border border-amber-200 text-sm" value={cloudConfig.storageBucket} onChange={e => setCloudConfig({...cloudConfig, storageBucket: e.target.value})} />
+              <input type="text" placeholder="App ID" className="w-full p-2 rounded border border-amber-200 text-sm" value={cloudConfig.appId} onChange={e => setCloudConfig({...cloudConfig, appId: e.target.value})} />
+              
+              <div className="flex gap-2 pt-2">
+                <Button variant="secondary" onClick={() => setShowCloudSetup(false)} className="flex-1">取消</Button>
+                <Button onClick={handleSaveCloudConfig} className="flex-1">保存并连接</Button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6 animate-fade-in">
+            {/* User Info Card */}
+            <div className="bg-white/60 backdrop-blur-sm p-6 rounded-3xl shadow-sm border border-amber-100 flex flex-col items-center text-center relative">
+              <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-amber-200 to-orange-100 p-1 mb-4 shadow-md">
+                 <div className="w-full h-full rounded-full bg-white flex items-center justify-center overflow-hidden">
+                    <RabbitLogo className="w-16 h-16 text-amber-400" />
+                 </div>
+              </div>
+              
+              {isEditingProfile ? (
+                <div className="w-full space-y-3">
+                  <input
+                    type="text"
+                    value={tempProfile.name}
+                    onChange={(e) => setTempProfile({...tempProfile, name: e.target.value})}
+                    className="w-full text-center font-bold text-xl border-b border-amber-300 bg-transparent focus:outline-none text-amber-900"
+                    placeholder="昵称"
+                  />
+                  <textarea
+                    value={tempProfile.bio}
+                    onChange={(e) => setTempProfile({...tempProfile, bio: e.target.value})}
+                    className="w-full text-center text-sm text-amber-800/80 bg-white/50 rounded-lg p-2 border border-amber-100 focus:outline-none resize-none"
+                    rows={4}
+                    placeholder="个性签名"
+                  />
+                  <div className="flex justify-center gap-2 mt-2">
+                    <Button variant="secondary" onClick={cancelEditing} className="px-3 py-1 text-sm h-8">取消</Button>
+                    <Button onClick={saveProfile} className="px-3 py-1 text-sm h-8">保存</Button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <h2 className="text-2xl font-bold text-amber-900 mb-2">{userProfile.name}</h2>
+                  <p className="text-amber-800/70 text-sm leading-relaxed max-w-xs font-serif-sc">{userProfile.bio}</p>
+                  <button 
+                    onClick={startEditing}
+                    className="absolute top-4 right-4 text-amber-400 hover:text-amber-600 transition-colors"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                      <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                    </svg>
+                  </button>
+                </>
+              )}
+            </div>
+
+            {/* Function List */}
+            <div className="space-y-3">
+              <div className="bg-white/60 backdrop-blur-sm rounded-2xl p-4 shadow-sm border border-amber-100">
+                <h3 className="font-bold text-amber-900 mb-3 text-sm uppercase tracking-wider">数据管理</h3>
+                
+                <div className="grid grid-cols-2 gap-3">
+                  <button 
+                    onClick={handleExportData}
+                    className="flex flex-col items-center justify-center p-3 bg-amber-50 hover:bg-amber-100 rounded-xl transition-colors border border-amber-100"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-amber-600 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    <span className="text-xs font-medium text-amber-800">备份数据</span>
+                  </button>
+                  
+                  <button 
+                    onClick={handleImportClick}
+                    className="flex flex-col items-center justify-center p-3 bg-amber-50 hover:bg-amber-100 rounded-xl transition-colors border border-amber-100"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-amber-600 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    <span className="text-xs font-medium text-amber-800">恢复数据</span>
+                  </button>
+                  <input type="file" ref={backupFileInputRef} onChange={handleImportFileChange} className="hidden" accept=".json" />
+                </div>
+              </div>
+
+              <div className="bg-white/60 backdrop-blur-sm rounded-2xl p-4 shadow-sm border border-amber-100">
+                 <h3 className="font-bold text-amber-900 mb-3 text-sm uppercase tracking-wider">云端同步</h3>
+                 {isCloudActive ? (
+                   <div className="flex justify-between items-center">
+                      <div className="flex items-center text-green-600 text-sm font-medium">
+                        <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                        已连接到云端
+                      </div>
+                      <button onClick={handleDisconnectCloud} className="text-xs text-red-500 hover:text-red-700 underline">断开连接</button>
+                   </div>
+                 ) : (
+                   <Button variant="secondary" onClick={() => setShowCloudSetup(true)} className="w-full text-sm">
+                     配置云同步
+                   </Button>
+                 )}
+              </div>
+              
+              <Button onClick={handleLogout} variant="danger" className="w-full shadow-red-200">
+                退出登录
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // --- RESPONSIVE LAYOUT ---
+  // Mobile: Flex-col, Navbar at bottom
+  // Desktop: Flex-row, Sidebar at left
+
+  const navItems = [
+    { id: 'home', label: '主页', icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+      </svg>
+    )},
+    { id: 'diary', label: '日记', icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+      </svg>
+    )},
+    { id: 'upload', label: '上传', icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+      </svg>
+    )},
+    { id: 'profile', label: '我的', icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+      </svg>
+    )}
+  ];
+
+  return (
+    <div className="h-screen w-screen bg-[#FFF8E1] flex md:flex-row flex-col overflow-hidden">
+      {/* BACKGROUND DECORATIONS (Global) */}
+      <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
+         <div className="absolute top-[-10%] right-[-10%] w-[50vh] h-[50vh] bg-orange-200/20 rounded-full blur-[100px]"></div>
+         <div className="absolute bottom-[-10%] left-[-10%] w-[50vh] h-[50vh] bg-amber-200/20 rounded-full blur-[100px]"></div>
+      </div>
+
+      {/* DESKTOP SIDEBAR */}
+      <div className="hidden md:flex flex-col w-64 bg-white/40 backdrop-blur-xl border-r border-amber-100/50 shadow-lg z-50 h-full p-6">
+         <div className="flex items-center gap-3 mb-10 pl-2">
+            <RabbitLogo className="w-10 h-10 text-amber-500" />
+            <h1 className="text-2xl font-serif-sc font-bold text-amber-900 tracking-wider">余余</h1>
+         </div>
+         
+         <div className="flex flex-col gap-2 flex-1">
+            {navItems.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => setActiveTab(item.id as Tab)}
+                className={`flex items-center gap-4 px-4 py-3 rounded-xl transition-all duration-300 group
+                  ${activeTab === item.id 
+                    ? 'bg-amber-500 text-white shadow-lg shadow-amber-200 transform scale-105' 
+                    : 'text-amber-800 hover:bg-amber-100/50 hover:pl-5'
+                  }`}
+              >
+                <div className={`${activeTab === item.id ? 'text-white' : 'text-amber-600 group-hover:text-amber-700'}`}>
+                  {item.icon}
+                </div>
+                <span className="font-medium text-lg tracking-wide">{item.label}</span>
+              </button>
+            ))}
+         </div>
+
+         {isLoggedIn && (
+           <div className="mt-auto pt-6 border-t border-amber-200/30">
+              <div className="flex items-center gap-3 px-2">
+                 <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center">
+                    <span className="font-bold text-amber-600 text-lg">{userProfile.name[0]}</span>
+                 </div>
+                 <div>
+                    <p className="font-bold text-amber-900 text-sm">{userProfile.name}</p>
+                    <p className="text-xs text-amber-600">在线</p>
+                 </div>
+              </div>
+           </div>
+         )}
+      </div>
+
+      {/* MAIN CONTENT AREA */}
+      <div className="flex-1 h-full w-full relative flex flex-col z-10">
         {activeTab === 'home' && renderHome()}
-        {activeTab === 'diary' && renderDiary()}
         {activeTab === 'upload' && renderUpload()}
+        {activeTab === 'diary' && renderDiary()}
         {activeTab === 'profile' && renderProfile()}
-      </main>
+      </div>
 
-      {/* Bottom Navigation Bar */}
-      <nav className="fixed bottom-0 w-full z-50 bg-[#FFF8E1]/95 backdrop-blur-lg border-t border-amber-100 pb-safe shadow-[0_-4px_6px_-1px_rgba(251,191,36,0.1)]">
-        <div className="flex justify-around items-center h-16 max-w-md mx-auto">
-          <NavButton 
-            active={activeTab === 'home'} 
-            onClick={() => setActiveTab('home')} 
-            label="主页"
-            icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" /></svg>}
-          />
-          <NavButton 
-            active={activeTab === 'diary'} 
-            onClick={() => setActiveTab('diary')} 
-            label="日记"
-            icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>}
-          />
-          <NavButton 
-            active={activeTab === 'upload'} 
-            onClick={() => setActiveTab('upload')} 
-            label="上传"
-            icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>}
-          />
-          <NavButton 
-            active={activeTab === 'profile'} 
-            onClick={() => setActiveTab('profile')} 
-            label="我的"
-            icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>}
-          />
+      {/* MOBILE BOTTOM NAVIGATION */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-xl border-t border-amber-100 pb-safe pt-2 px-6 shadow-[0_-5px_20px_rgba(251,191,36,0.1)] z-50">
+        <div className="flex justify-between items-center h-16">
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => setActiveTab(item.id as Tab)}
+              className={`flex flex-col items-center justify-center w-12 transition-all duration-300
+                ${activeTab === item.id ? 'transform -translate-y-2' : ''}
+              `}
+            >
+              <div 
+                className={`
+                  p-2 rounded-2xl transition-all duration-300
+                  ${activeTab === item.id 
+                    ? 'bg-amber-500 text-white shadow-lg shadow-amber-200' 
+                    : 'text-amber-400 hover:text-amber-600 bg-transparent'
+                  }
+                `}
+              >
+                {/* Clone element to change size safely if needed, or just use wrapper class */}
+                <div className="w-6 h-6">{item.icon}</div>
+              </div>
+              <span 
+                className={`text-[10px] font-medium mt-1 transition-opacity duration-300
+                  ${activeTab === item.id ? 'text-amber-800 opacity-100' : 'opacity-0 h-0 overflow-hidden'}
+                `}
+              >
+                {item.label}
+              </span>
+            </button>
+          ))}
         </div>
-      </nav>
+      </div>
     </div>
   );
 };
-
-interface NavButtonProps {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-}
-
-const NavButton: React.FC<NavButtonProps> = ({ active, onClick, icon, label }) => (
-  <button 
-    onClick={onClick}
-    className={`flex flex-col items-center justify-center w-full h-full transition-all duration-300 ${active ? 'text-amber-600 scale-105' : 'text-amber-400 hover:text-amber-500'}`}
-  >
-    <div className={`transform transition-transform duration-200 ${active ? '-translate-y-1' : ''}`}>
-      {icon}
-    </div>
-    <span className={`text-[10px] mt-1 font-bold ${active ? 'opacity-100' : 'opacity-70'}`}>{label}</span>
-  </button>
-);
 
 export default App;

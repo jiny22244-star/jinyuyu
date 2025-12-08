@@ -23,6 +23,37 @@
       .font-serif-sc {
         font-family: 'Noto Serif SC', serif;
       }
+
+      /* Floating Hearts Animation */
+      @keyframes floatUp {
+        0% {
+          transform: translateY(100vh) scale(0.5) rotate(0deg);
+          opacity: 0.8;
+        }
+        100% {
+          transform: translateY(-20vh) scale(1.5) rotate(360deg);
+          opacity: 0;
+        }
+      }
+
+      .heart-bg {
+        position: absolute;
+        bottom: -20px;
+        animation: floatUp 15s linear infinite;
+        opacity: 0;
+        z-index: 0;
+        pointer-events: none;
+      }
+      
+      /* Twinkle Stars */
+      @keyframes twinkle {
+        0%, 100% { opacity: 0.3; transform: scale(0.8); }
+        50% { opacity: 1; transform: scale(1.2); }
+      }
+      
+      .star-twinkle {
+        animation: twinkle 3s ease-in-out infinite;
+      }
     </style>
   <script type="importmap">
 {
@@ -30,7 +61,11 @@
     "react/": "https://aistudiocdn.com/react@^19.2.1/",
     "react": "https://aistudiocdn.com/react@^19.2.1",
     "@google/genai": "https://aistudiocdn.com/@google/genai@^1.31.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/"
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
+    "firebase/firestore": "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js",
+    "firebase/storage": "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js",
+    "firebase/": "https://aistudiocdn.com/firebase@^12.6.0/"
   }
 }
 </script>

@@ -1,10 +1,51 @@
-import { Post, DiaryEntry } from '../types';
+import { Post, DiaryEntry, FirebaseConfig } from '../types';
+import { 
+  initFirebase, 
+  savePostToCloud, 
+  getPostsFromCloud, 
+  saveDiaryToCloud, 
+  getDiaryFromCloud, 
+  deleteDiaryFromCloud,
+  uploadImageToCloud
+} from './firebase';
 
 const DB_NAME = 'YuYuDB';
-const DB_VERSION = 2; // Incremented for Diary store
+const DB_VERSION = 2;
 const STORE_POSTS = 'posts';
 const STORE_DIARY = 'diary';
 const PROFILE_KEY = 'yuyu_user_profile';
+const CLOUD_CONFIG_KEY = 'yuyu_firebase_config';
+
+// --- Configuration Management ---
+
+export const getCloudConfig = (): FirebaseConfig | null => {
+  try {
+    const stored = localStorage.getItem(CLOUD_CONFIG_KEY);
+    return stored ? JSON.parse(stored) : null;
+  } catch {
+    return null;
+  }
+};
+
+export const saveCloudConfig = (config: FirebaseConfig) => {
+  localStorage.setItem(CLOUD_CONFIG_KEY, JSON.stringify(config));
+  initFirebase(config);
+};
+
+export const removeCloudConfig = () => {
+  localStorage.removeItem(CLOUD_CONFIG_KEY);
+  window.location.reload(); // Reload to clear firebase state if needed
+};
+
+// Initialize Cloud if config exists
+const storedConfig = getCloudConfig();
+if (storedConfig) {
+  initFirebase(storedConfig);
+}
+
+const isCloudEnabled = (): boolean => {
+  return !!getCloudConfig();
+};
 
 // --- IndexedDB Helper ---
 
@@ -28,13 +69,9 @@ const initDB = (): Promise<IDBDatabase> => {
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
-      
-      // Create Posts store
       if (!db.objectStoreNames.contains(STORE_POSTS)) {
         db.createObjectStore(STORE_POSTS, { keyPath: 'id' });
       }
-
-      // Create Diary store
       if (!db.objectStoreNames.contains(STORE_DIARY)) {
         db.createObjectStore(STORE_DIARY, { keyPath: 'id' });
       }
@@ -42,15 +79,32 @@ const initDB = (): Promise<IDBDatabase> => {
   });
 };
 
+// --- Helper: Upload Image (Auto detects Cloud vs Local) ---
+export const uploadPostImage = async (file: File): Promise<string | undefined> => {
+  if (isCloudEnabled()) {
+    return await uploadImageToCloud(file);
+  } else {
+    // For local, we stick to base64 which is handled in App.tsx reader
+    // This function acts as a pass-through or a place to handle local file system if we had it
+    return undefined; 
+  }
+};
+
 // --- Posts Operations ---
 
 export const savePostToDB = async (post: Post): Promise<void> => {
+  // CLOUD MODE
+  if (isCloudEnabled()) {
+    return savePostToCloud(post);
+  }
+
+  // LOCAL MODE
   try {
     const db = await initDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction([STORE_POSTS], 'readwrite');
       const store = transaction.objectStore(STORE_POSTS);
-      const request = store.put(post); // Changed from add to put to support updates/overwrites
+      const request = store.put(post);
 
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
@@ -62,6 +116,18 @@ export const savePostToDB = async (post: Post): Promise<void> => {
 };
 
 export const getPostsFromDB = async (): Promise<Post[]> => {
+  // CLOUD MODE
+  if (isCloudEnabled()) {
+    try {
+      return await getPostsFromCloud();
+    } catch (e) {
+      console.error("Cloud fetch failed, falling back to local for viewing?", e);
+      // Fallthrough to local? No, that's confusing.
+      throw e;
+    }
+  }
+
+  // LOCAL MODE
   try {
     const db = await initDB();
     return new Promise((resolve, reject) => {
@@ -71,14 +137,12 @@ export const getPostsFromDB = async (): Promise<Post[]> => {
 
       request.onsuccess = () => {
         const posts = request.result as Post[];
-        // Sort by date descending
         posts.sort((a, b) => {
           const dateA = a.date instanceof Date ? a.date : new Date(a.date);
           const dateB = b.date instanceof Date ? b.date : new Date(b.date);
           return dateB.getTime() - dateA.getTime();
         });
         
-        // Ensure Date objects are instantiated
         const postsWithDates = posts.map(p => ({
             ...p,
             date: p.date instanceof Date ? p.date : new Date(p.date)
@@ -97,12 +161,16 @@ export const getPostsFromDB = async (): Promise<Post[]> => {
 // --- Diary Operations ---
 
 export const saveDiaryEntryToDB = async (entry: DiaryEntry): Promise<void> => {
+  if (isCloudEnabled()) {
+    return saveDiaryToCloud(entry);
+  }
+
   try {
     const db = await initDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction([STORE_DIARY], 'readwrite');
       const store = transaction.objectStore(STORE_DIARY);
-      const request = store.put(entry); // put handles both add and update
+      const request = store.put(entry);
 
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
@@ -114,6 +182,10 @@ export const saveDiaryEntryToDB = async (entry: DiaryEntry): Promise<void> => {
 };
 
 export const getDiaryEntriesFromDB = async (): Promise<DiaryEntry[]> => {
+  if (isCloudEnabled()) {
+    return getDiaryFromCloud();
+  }
+
   try {
     const db = await initDB();
     return new Promise((resolve, reject) => {
@@ -146,6 +218,10 @@ export const getDiaryEntriesFromDB = async (): Promise<DiaryEntry[]> => {
 };
 
 export const deleteDiaryEntryFromDB = async (id: string): Promise<void> => {
+  if (isCloudEnabled()) {
+    return deleteDiaryFromCloud(id);
+  }
+
   try {
     const db = await initDB();
     return new Promise((resolve, reject) => {
@@ -212,27 +288,17 @@ export const exportAllData = async (): Promise<BackupData> => {
 };
 
 export const importAllData = async (data: BackupData): Promise<void> => {
-  // 1. Restore Profile
   if (data.profile) {
     saveProfileToStorage(data.profile);
   }
-
-  // 2. Restore Posts (Sequential to ensure transaction safety)
   if (data.posts && Array.isArray(data.posts)) {
     for (const post of data.posts) {
-      // Re-hydrate dates
-      const hydratedPost = {
-        ...post,
-        date: new Date(post.date)
-      };
+      const hydratedPost = { ...post, date: new Date(post.date) };
       await savePostToDB(hydratedPost);
     }
   }
-
-  // 3. Restore Diary
   if (data.diary && Array.isArray(data.diary)) {
     for (const entry of data.diary) {
-      // Re-hydrate dates
       const hydratedEntry = {
         ...entry,
         date: new Date(entry.date),

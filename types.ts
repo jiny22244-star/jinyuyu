@@ -6,10 +6,10 @@ export enum AppState {
 }
 
 export interface ImageFile {
-  file: File;
+  file?: File;
   previewUrl: string;
-  base64: string;
-  mimeType: string;
+  base64?: string;
+  mimeType?: string;
 }
 
 export interface AnalysisResult {
@@ -21,6 +21,7 @@ export interface Post {
   image: ImageFile;
   description: string;
   date: Date;
+  imageUrl?: string; // For Cloud Storage URL
 }
 
 export interface DiaryEntry {
@@ -32,3 +33,14 @@ export interface DiaryEntry {
 }
 
 export type Tab = 'home' | 'diary' | 'upload' | 'profile';
+
+export type ViewMode = 'grid' | 'spiral' | 'tree' | 'kaleidoscope';
+
+export interface FirebaseConfig {
+  apiKey: string;
+  authDomain: string;
+  projectId: string;
+  storageBucket: string;
+  messagingSenderId: string;
+  appId: string;
+}
