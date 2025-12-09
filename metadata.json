@@ -1,5 +1,7 @@
 {
-  "name": "Copy of 余余",
+  "name": "余余",
   "description": "记录生活中的甜蜜时刻",
-  "requestFramePermissions": []
+  "requestFramePermissions": [
+    "camera"
+  ]
 }

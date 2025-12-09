@@ -54,6 +54,20 @@
       .star-twinkle {
         animation: twinkle 3s ease-in-out infinite;
       }
+
+      /* Loader for 3D */
+      .loader-bar {
+        width: 100%;
+        height: 4px;
+        background: rgba(255,255,255,0.2);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .loader-progress {
+        height: 100%;
+        background: #F59E0B;
+        transition: width 0.3s ease;
+      }
     </style>
   <script type="importmap">
 {
@@ -65,7 +79,11 @@
     "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
     "firebase/firestore": "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js",
     "firebase/storage": "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js",
-    "firebase/": "https://aistudiocdn.com/firebase@^12.6.0/"
+    "firebase/": "https://aistudiocdn.com/firebase@^12.6.0/",
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/examples/jsm/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/+esm",
+    "three/": "https://aistudiocdn.com/three@^0.181.2/"
   }
 }
 </script>

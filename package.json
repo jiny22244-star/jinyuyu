@@ -1,5 +1,5 @@
 {
-  "name": "copy-of-余余",
+  "name": "余余",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -12,7 +12,9 @@
     "react": "^19.2.1",
     "@google/genai": "^1.31.0",
     "react-dom": "^19.2.1",
-    "firebase": "^12.6.0"
+    "firebase": "^12.6.0",
+    "three": "^0.181.2",
+    "@mediapipe/tasks-vision": "0.10.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

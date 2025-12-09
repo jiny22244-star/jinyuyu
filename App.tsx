@@ -4,6 +4,7 @@ import { Button } from './components/Button';
 import { ImageFile, Post, Tab, DiaryEntry, FirebaseConfig, ViewMode } from './types';
 import { RabbitLogo } from './components/RabbitLogo';
 import { GalleryViews } from './components/GalleryViews';
+import { InteractiveTree } from './components/InteractiveTree';
 import { 
   savePostToDB, 
   getPostsFromDB, 
@@ -28,7 +29,7 @@ const App: React.FC = () => {
   const [diaryEntries, setDiaryEntries] = useState<DiaryEntry[]>([]);
   const [isLoadingData, setIsLoadingData] = useState(true);
   
-  // Auth State
+  // Auth State - Changed to localStorage for persistence
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
@@ -62,12 +63,14 @@ const App: React.FC = () => {
   // View Mode State
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [isEffectMenuOpen, setIsEffectMenuOpen] = useState(false);
+  // Separate state for the immersive 3D modal
+  const [showInteractiveTree, setShowInteractiveTree] = useState(false);
 
   // Initial Data Load
   useEffect(() => {
-    // Check session login
-    const sessionAuth = sessionStorage.getItem('yuyu_auth');
-    if (sessionAuth === 'true') {
+    // Check local storage auth
+    const localAuth = localStorage.getItem('yuyu_auth');
+    if (localAuth === 'true') {
       setIsLoggedIn(true);
     }
 
@@ -86,7 +89,7 @@ const App: React.FC = () => {
           setUserProfile(loadedProfile);
         }
 
-        if (sessionAuth === 'true') {
+        if (localAuth === 'true') {
           await refreshData();
         }
       } catch (error) {
@@ -100,6 +103,7 @@ const App: React.FC = () => {
   }, []);
 
   const refreshData = async () => {
+    // This will fetch from Cloud if isCloudActive is true (handled in services/storage)
     const loadedPosts = await getPostsFromDB();
     setPosts(loadedPosts);
     const loadedDiary = await getDiaryEntriesFromDB();
@@ -119,7 +123,7 @@ const App: React.FC = () => {
     e.preventDefault();
     if (loginForm.username === 'yuyu' && loginForm.password === '1009') {
       setIsLoggedIn(true);
-      sessionStorage.setItem('yuyu_auth', 'true');
+      localStorage.setItem('yuyu_auth', 'true'); // Persist login
       setLoginError('');
       setLoginForm({ username: '', password: '' });
     } else {
@@ -129,7 +133,7 @@ const App: React.FC = () => {
 
   const handleLogout = () => {
     setIsLoggedIn(false);
-    sessionStorage.removeItem('yuyu_auth');
+    localStorage.removeItem('yuyu_auth');
     setPosts([]);
     setDiaryEntries([]);
     setActiveTab('profile');
@@ -332,6 +336,11 @@ const App: React.FC = () => {
   const handleEffectChange = (mode: ViewMode) => {
     setViewMode(mode);
     setIsEffectMenuOpen(false);
+    
+    // If tree selected, open immersive 3D
+    if (mode === 'tree') {
+      setShowInteractiveTree(true);
+    }
   };
 
   // --- RENDERERS ---
@@ -363,7 +372,7 @@ const App: React.FC = () => {
         {isCloudActive && (
           <span className="text-xs bg-blue-100/80 backdrop-blur-sm text-blue-800 px-2 py-1 rounded-full font-medium flex items-center shadow-sm">
             <span className="w-2 h-2 bg-blue-500 rounded-full mr-1 animate-pulse"></span>
-            云端同步中
+            云端同步
           </span>
         )}
         
@@ -388,7 +397,7 @@ const App: React.FC = () => {
                 🌀 环形旋转
               </button>
               <button onClick={() => handleEffectChange('tree')} className={`block w-full text-left px-4 py-2 text-sm hover:bg-amber-50 ${viewMode === 'tree' ? 'text-amber-600 font-bold bg-amber-50/50' : 'text-gray-700'}`}>
-                🎄 圣诞树
+                🎄 3D 圣诞树
               </button>
               <button onClick={() => handleEffectChange('kaleidoscope')} className={`block w-full text-left px-4 py-2 text-sm hover:bg-amber-50 ${viewMode === 'kaleidoscope' ? 'text-amber-600 font-bold bg-amber-50/50' : 'text-gray-700'}`}>
                 🌸 万花镜
@@ -445,6 +454,11 @@ const App: React.FC = () => {
       </div>
     </div>
   );
+
+  // ... (Other render functions: renderUpload, renderDiary, renderProfile remain same)
+  // Re-paste them for completeness if needed or just assume they are part of the file update context 
+  // But standard practice for this prompt style is to include the whole file if structure changes significantly.
+  // I will include the rest of the render functions to be safe.
 
   const renderUpload = () => (
     <div className="flex-1 overflow-y-auto px-4 pt-6 pb-24 relative z-10">
@@ -734,10 +748,6 @@ const App: React.FC = () => {
     </div>
   );
 
-  // --- RESPONSIVE LAYOUT ---
-  // Mobile: Flex-col, Navbar at bottom
-  // Desktop: Flex-row, Sidebar at left
-
   const navItems = [
     { id: 'home', label: '主页', icon: (
       <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -768,6 +778,17 @@ const App: React.FC = () => {
          <div className="absolute top-[-10%] right-[-10%] w-[50vh] h-[50vh] bg-orange-200/20 rounded-full blur-[100px]"></div>
          <div className="absolute bottom-[-10%] left-[-10%] w-[50vh] h-[50vh] bg-amber-200/20 rounded-full blur-[100px]"></div>
       </div>
+
+      {/* IMMERSIVE 3D OVERLAY */}
+      {showInteractiveTree && (
+        <InteractiveTree 
+          posts={posts} 
+          onClose={() => {
+            setShowInteractiveTree(false);
+            setViewMode('grid'); // Reset to grid on close
+          }} 
+        />
+      )}
 
       {/* DESKTOP SIDEBAR */}
       <div className="hidden md:flex flex-col w-64 bg-white/40 backdrop-blur-xl border-r border-amber-100/50 shadow-lg z-50 h-full p-6">
@@ -819,7 +840,7 @@ const App: React.FC = () => {
       </div>
 
       {/* MOBILE BOTTOM NAVIGATION */}
-      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-xl border-t border-amber-100 pb-safe pt-2 px-6 shadow-[0_-5px_20px_rgba(251,191,36,0.1)] z-50">
+      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-xl border-t border-amber-100 pb-safe pt-2 px-6 shadow-[0_-5px_20px_rgba(251,191,36,0.1)] z-40">
         <div className="flex justify-between items-center h-16">
           {navItems.map((item) => (
             <button
